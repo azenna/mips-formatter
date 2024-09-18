@@ -1,0 +1,22 @@
+cabal-version:      3.0
+name:               mips-formatter
+version:            0.1.0.0
+license:            MIT
+license-file:       LICENSE
+author:             zenna allwein
+maintainer:         zrallwein@gmail.com
+build-type:         Simple
+extra-doc-files:    CHANGELOG.md
+
+common warnings
+    ghc-options: -Wall
+
+executable mips-formatter
+    import:           warnings
+    main-is:          Main.hs
+    build-depends:    base >=4.19.1.0
+                    , containers
+                    , megaparsec
+                    , text
+    hs-source-dirs:   src
+    default-language: GHC2024
