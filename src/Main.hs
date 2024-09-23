@@ -1,18 +1,17 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE LambdaCase #-}
 module Main where
 
 import Control.Applicative ((<|>))
 import Control.Monad (void)
-import Data.Functor (($>), (<&>))
-import Data.Foldable (traverse_)
-import Data.Char (isAlphaNum, isAlpha, isNumber, isSpace)
-import Data.Either (fromRight)
-import Data.Maybe (fromMaybe, catMaybes, maybe)
+import Data.Function (on)
+import Data.Char (isAlphaNum, isSpace)
+import Data.Maybe (catMaybes)
 import Data.List (intercalate)
 import qualified Text.Megaparsec as M
 import qualified Text.Megaparsec.Char as M
-import qualified Text.Megaparsec.Error.Builder as M
 import Text.Read (readMaybe)
+
 
 type MipsParser = M.Parsec String String
 
@@ -31,7 +30,7 @@ next = (M.hspace >>)
 type Comment = String
 
 parseComment :: MipsParser Comment
-parseComment = M.char '#' >> next (intercalate " " <$> M.sepBy notSpace M.hspace1)
+parseComment = M.char '#' >> next (unwords <$> M.sepBy notSpace M.hspace1)
 
 writeComment :: Comment -> String
 writeComment = ("# " <>)
@@ -129,11 +128,18 @@ parseData = do
     , value
     }
 
-writeData :: Data -> String
-writeData sdata =  intercalate " "
-  [ writeLabel (label sdata)
-  , fromMaybe "" (writeDirective <$> mDirective sdata)
-  , writeDataValue (value sdata)
+dataToIndentRules :: Data -> IndentRules
+dataToIndentRules dat = IndentRules
+  { labelLength = length . writeLabel . label $ dat
+  , instructionLength = maybe 0 (length . writeDirective) (mDirective dat)
+  , argumentLength = length . writeDataValue . value $ dat
+  }
+
+writeData :: IndentRules -> Data -> String
+writeData ir sdata =  unwords
+  [ processRule labelLength ir . writeLabel $ label sdata
+  , processRule instructionLength ir . maybe "" writeDirective $ mDirective sdata
+  , processRule argumentLength ir . writeDataValue $ value sdata
   ]
 
 data OpArg =
@@ -163,6 +169,9 @@ writeOpArg = \case
   OAOffset off r -> writeMipsInt off <> "(" <> writeReg r <> ")"
   OAIdent i -> i
 
+writeOpArgs :: [OpArg] -> String
+writeOpArgs =  intercalate ", " . map writeOpArg
+
 data MipsText = MipsText
   { mLabel :: Maybe Label
   , op :: Op
@@ -180,11 +189,18 @@ parseMipsText = do
     , args
     }
 
-writeMipsText :: MipsText -> String
-writeMipsText mt = intercalate " "
-  [ maybe "" writeLabel (mLabel mt)
-  , op mt
-  , intercalate ", " . fmap writeOpArg $ args mt
+mipsTextToIndentRules :: MipsText -> IndentRules
+mipsTextToIndentRules mt = IndentRules
+  { labelLength = maybe 0 (length . writeLabel) (mLabel mt)
+  , instructionLength = length $ op mt
+  , argumentLength = length . writeOpArgs . args $ mt
+  }
+
+writeMipsText :: IndentRules -> MipsText -> String
+writeMipsText ir mt = unwords
+  [ processRule labelLength ir $ maybe "" writeLabel (mLabel mt)
+  , processRule instructionLength ir $ op mt
+  , processRule argumentLength ir . writeOpArgs $ args mt
   ]
 
 data LineContent =
@@ -200,16 +216,32 @@ parseLineContent = M.choice
   , LCDirective <$> parseDirective <*> M.optional (next parseDataValue)
   ]
 
-writeLineContent :: LineContent -> String
-writeLineContent = \case
-  LCDirective d mdv -> writeDirective d <> maybe "" writeDataValue mdv
-  LCData d -> writeData d
-  LCText t -> writeMipsText t
+writeLineContent :: IndentRules -> LineContent -> String
+writeLineContent ir = \case
+  LCDirective d mdv -> unwords
+    [ processRule labelLength ir ""
+    , processRule instructionLength ir $ writeDirective d
+    , processRule argumentLength ir $ maybe "" writeDataValue mdv
+    ]
+  LCData d -> writeData ir d
+  LCText t -> writeMipsText ir t
+
+lineContentToIndentRules :: LineContent -> IndentRules
+lineContentToIndentRules = \case
+  LCDirective d mdv -> IndentRules
+    { labelLength = 0
+    , instructionLength = length $ writeDirective d
+    , argumentLength = maybe 0 (length . writeDataValue) mdv }
+  LCData d -> dataToIndentRules d
+  LCText t -> mipsTextToIndentRules t
 
 data Line = Line
   { mContent :: Maybe LineContent
   , mComment :: Maybe Comment
   } deriving (Eq, Show)
+
+lineToIndentRules :: Line -> IndentRules
+lineToIndentRules = maybe defaultIndentRules lineContentToIndentRules . mContent
 
 parseLine :: MipsParser Line
 parseLine = do
@@ -219,26 +251,49 @@ parseLine = do
     { mContent
     , mComment }
 
-writeLine :: Line -> String
-writeLine line = intercalate " " $ catMaybes
-  [ writeLineContent <$> mContent line
+writeLine :: IndentRules -> Line -> String
+writeLine ir line = unwords $ catMaybes
+  [ writeLineContent ir <$> mContent line
   , writeComment <$> mComment line
   ]
 
 type Ast = [Line]
 
 parseAst :: MipsParser Ast
-parseAst = do
-  line <- parseLine
-  mRest <- M.optional (next M.newline >> parseAst)
-  case mRest of
-    Just rest -> pure (line : rest)
-    Nothing -> pure [line]
+parseAst =  M.sepBy parseLine (next M.newline)
 
-writeAst :: Ast -> String
-writeAst = intercalate "\n" . fmap writeLine
+writeAst :: IndentRules -> Ast -> String
+writeAst ir = intercalate "\n" . fmap (writeLine ir)
+
+data IndentRules = IndentRules
+  { labelLength :: Int
+  , instructionLength :: Int
+  , argumentLength :: Int
+  } deriving (Eq, Show)
+
+
+processRule :: (IndentRules -> Int) -> IndentRules -> String -> String
+processRule sel ir s = s <> replicate (sel ir - length s) ' '
+
+defaultIndentRules :: IndentRules
+defaultIndentRules = IndentRules
+  { labelLength = 0
+  , instructionLength = 0
+  , argumentLength = 0
+  }
+
+zipIndentRules :: IndentRules -> IndentRules -> IndentRules
+zipIndentRules ir1 ir2 = IndentRules
+  { labelLength = zipir labelLength
+  , instructionLength = zipir instructionLength
+  , argumentLength = zipir argumentLength
+  }
+  where zipir sel = on max sel ir1 ir2
 
 main :: IO ()
 main = do
   cont <- readFile "fib.asm"
-  writeFile "out.asm" $ fromRight "" (writeAst <$> M.runParser parseAst "" cont)
+  case M.runParser parseAst "" cont of
+    Left err -> error "didn't work"
+    Right res ->
+      writeFile "out.asm" $ writeAst (foldr (zipIndentRules . lineToIndentRules) defaultIndentRules res) res

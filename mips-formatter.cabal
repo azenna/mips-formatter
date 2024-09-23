@@ -19,4 +19,4 @@ executable mips-formatter
                     , megaparsec
                     , text
     hs-source-dirs:   src
-    default-language: GHC2024
+    default-language: GHC2021
